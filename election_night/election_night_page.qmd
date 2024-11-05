@@ -1,0 +1,521 @@
+---
+output:
+  html_document:
+    self_contained: true
+editor_options: 
+  chunk_output_type: console
+---
+
+```{r, include=FALSE}
+# Setup
+harris_states <- c()
+trump_states <- c()
+
+library(plotly)
+library(tidyverse)
+library(DT)
+library(maps)
+library(ggthemes)
+library(tidybayes)
+library(gridExtra)
+library(patchwork)
+
+forecast <- readRDS("forecast.RDS")
+draws <- readRDS("draws.RDS")
+draws <- draws |> 
+  filter(t == max(draws$t))
+state_weights <- readRDS("state_weights.RDS")
+state_weights <- data.frame(
+  state = names(state_weights),
+  weight = as.numeric(state_weights)
+)
+
+# Subsetting based on called states
+if (!is.null(harris_states)) {
+  for (s in harris_states) {
+    draws_to_select <- draws |> 
+      filter(state == s & p_harris > .5)
+    
+    draws <- draws |> 
+      filter(draw %in% draws_to_select$draw)
+  }
+}
+if (!is.null(trump_states)) {
+  for (s in harris_states) {
+    draws_to_select <- draws |> 
+      filter(state == s & p_harris < .5)
+
+    draws <- draws |> 
+      filter(draw %in% draws_to_select$draw)
+  }
+}
+
+```
+
+::: panel-tabset
+
+## Overblik
+
+```{r, echo=FALSE}
+#| warning: false
+#| message: false
+
+# Getting probabilities
+df_sum <- draws |> 
+  filter(t == max(t)) %>%
+  left_join(state_weights, by = "state") |> 
+  group_by(draw) %>%
+  summarise(
+    dem_ev = sum(ev * (p_harris > 0.5)),
+    rep_ev = sum(ev * (p_harris < 0.5)),
+    mean_dem = sum(p_harris * weight),
+    .group = "keep") |> 
+  mutate(winner = case_when(
+    dem_ev >= 270 ~ "Democratic",
+    dem_ev < 269 ~ "Republican",
+    dem_ev == 269 ~ "No winner")) |> 
+  group_by(dem_ev) |> 
+  mutate(count = n()) |> 
+  ungroup()
+
+p_dem <- mean(df_sum$winner == "Democratic")
+p_rep <- mean(df_sum$winner == "Republican")
+
+data <- data.frame(
+  candidate = c("Harris", "Trump"),
+  win_prob = c(p_dem, p_rep))
+
+# Compute percentages
+data$fraction <- data$win_prob / sum(data$win_prob)
+# Compute the cumulative percentages (top of each rectangle)
+data$ymax <- cumsum(data$fraction)
+# Compute the bottom of each rectangle
+data$ymin <- c(0, head(data$ymax, n=-1))
+# Compute label position
+data$labelPosition <- (data$ymax + data$ymin) / 2
+# Compute a good label
+data$label <- paste0(data$candidate, "\n", round(data$win_prob*100, 1), "%")
+
+# Make the plot
+pie <- ggplot(data, aes(ymax=ymax, ymin=ymin, xmax=4, xmin=3, fill=candidate)) +
+  geom_rect() +
+  geom_label( x=3.5, aes(y=labelPosition, label=label), size=5) +
+  scale_fill_manual(
+    values = c('Harris' = '#3A4EB1',
+               'Trump' = '#E40A04')) +
+  coord_polar(theta="y") +
+  xlim(c(2, 4)) +
+  theme_void() +
+  theme(legend.position = "none",
+        plot.title = element_text(hjust = 0.5)) +
+  labs(title = "Vindersandsynligheder")
+
+
+ev_medians <- data.frame(
+  candidate = c("Kamala Harris", "Donald Trump"),
+  value = c(median(df_sum$dem_ev), median(df_sum$rep_ev)))
+
+ev_modes <- data.frame(
+  candidate = c("Kamala Harris", "Donald Trump"),
+  value = c(
+    as.numeric(names(sort(table(df_sum$dem_ev), decreasing = TRUE)[1])),  # Mode for dem_ev
+    as.numeric(names(sort(table(df_sum$rep_ev), decreasing = TRUE)[1]))   # Mode for rep_ev
+  )
+)
+
+ev_plot <- draws |> 
+  group_by(draw) %>%
+  summarise(dem_ev = sum(ev * (p_harris > 0.5)),
+            rep_ev = sum(ev * (p_harris < 0.5)),
+            .group = "keep") |> 
+  pivot_longer(cols = c(dem_ev, rep_ev),
+               names_to = "candidate") |> 
+  mutate(candidate = if_else(
+    candidate == "dem_ev",
+    "Kamala Harris",
+    "Donald Trump")) |> 
+  ggplot(aes(y = candidate, x = value, fill = candidate)) +
+  stat_halfeye(
+    .width = c(0.8, 0.95)
+  ) +
+  geom_vline(xintercept = 269, linetype = "dashed") +
+  geom_text(
+    data = ev_medians,
+    aes(label = value),
+    nudge_y = -.08,
+    size = 4
+  ) +
+  geom_text(
+    data = ev_modes,
+    aes(label = paste0("Mode:\n", value)),
+    nudge_y = .85,
+    nudge_x = 15,
+    size = 4
+  ) +
+  scale_fill_manual(
+    name = '',
+    values = c('Kamala Harris' = '#3A4EB1',
+               'Donald Trump' = '#E40A04')) +
+  theme_minimal() +
+  theme(
+    axis.title.x = element_text(),
+    plot.subtitle = element_text(hjust = 0.5),
+    plot.title = element_text(hjust = 0.5)) +
+  labs(
+    title = "EV prognose",
+    subtitle = "Med median og mest sandsynlige udfald",
+    x = "Electoral votes",
+    y = NULL) +
+  guides(fill = "none")
+
+
+pop_vote <- df_sum |> 
+  summarise(
+    dem_mean = mean(mean_dem*100),
+    dem_low = quantile(mean_dem*100, 0.05),
+    dem_high = quantile(mean_dem*100, 0.95),
+    rep_mean = mean(100-mean_dem*100),
+    rep_low = quantile(100-mean_dem*100, 0.05),
+    rep_high = quantile(100-mean_dem*100, 0.95)
+  ) |> 
+  pivot_longer(cols = c(dem_mean, rep_mean),
+               names_to = "variable") |> 
+  mutate(
+    candidate = if_else(
+      variable == "dem_mean",
+      "Harris",
+      "Trump"),
+      mean = value,
+      low = if_else(
+        candidate == "Harris",
+        dem_low,
+        rep_low),
+      high = if_else(
+        candidate == "Harris",
+        dem_high,
+        rep_high)) |> 
+    select(candidate, mean, low, high) |> 
+  ggplot(aes(y = candidate,
+             x = mean,
+             xmin = low,
+             xmax = high,
+             color = candidate)) +
+  geom_point(size = 2) +
+  geom_linerange(size = 2.5,
+                 alpha = .4) +
+  geom_vline(xintercept = 50,
+             linetype = "dashed") +
+  geom_text(
+    aes(label = round(mean, digits = 1)),
+    nudge_y = -.05,
+    size = 3) +
+  scale_color_manual(
+    values = c('Harris' = '#3A4EB1',
+               'Trump' = '#E40A04')) +
+  theme_minimal() +
+  labs(title = "Popular vote prognose",
+       y = NULL,
+       x = "Stemmeandel (%)") +
+  guides(color = "none") +
+  theme(plot.title = element_text(hjust = 0.5))
+
+(pie / pop_vote) | ev_plot +
+  plot_layout(widths = c(500, 1))
+
+```
+
+## EV-fordeling
+
+```{r, echo=FALSE}
+#| warning: false
+#| message: false
+
+# Static plot
+ev_distribution <- ggplot(df_sum, aes(x = dem_ev, fill = winner,
+             text = paste0(
+               "Count: ", count, "<br>",
+               "Winner: ", winner, "<br>",
+               "Dem EVs: ", dem_ev, "<br>",
+               "Rep EVs: ", 538-dem_ev))) +
+  geom_vline(xintercept = 269.5) +
+  geom_histogram(binwidth = 1) +
+  theme_fivethirtyeight() +
+  theme(legend.position = 'bottom',
+        panel.grid.minor = element_blank(),
+        axis.title.x = element_text(),
+        plot.caption = element_text(hjust = 0.5, face = "italic", size = 8)) +
+  scale_fill_manual(
+    name = 'Winner in the EC',
+    values = c('Democratic' = '#3A4EB1',
+               'Republican' = '#E40A04',
+               "No winner" = "black")) +
+  labs(x = 'Electoral votes for Kamala Harris',
+       subtitle = paste0(
+         "Probability of Harris win: ", round(p_dem * 100, 1), "%\n",
+         "Probability of Trump win: ", round(p_rep * 100, 1), "%\n"),
+       caption = paste(
+         "Last updated:",
+         format(Sys.time(), "%Y-%m-%d %H:%M"))) +
+  guides(fill = "none")
+
+ggplotly(ev_distribution, tooltip = "text") |> 
+  layout(
+    xaxis = list(fixedrange = TRUE),
+    yaxis = list(fixedrange = TRUE),
+    dragmode = "pan",
+    annotations = list(
+      list(
+        x = 0.5,  # Center alignment
+        y = 1.05,  # Position below the plot area
+        text = paste0(
+          "Probability of Harris win: ", round(p_dem * 100, 1), "%  |  ",
+          "Probability of Trump win: ", round(p_rep * 100, 1), "%", "<br>",
+          "(Updated: ", format(Sys.time(), "%Y-%m-%d %H:%M"), ")"
+        ),
+        showarrow = FALSE,
+        xref = "paper", yref = "paper",
+        xanchor = "center", yanchor = "top",
+        font = list(size = 16, color = "black"))))
+```
+
+## Kortet
+
+```{r, echo=FALSE}
+#| warning: false
+#| message: false
+
+us_states <- map_data("state")
+
+map_data <- us_states %>%
+  left_join(
+    draws |> 
+      filter(t == max(draws$t)) |> 
+      group_by(state) |> 
+      summarise(prob_dem = mean(p_harris > .5),
+                prob_rep = mean(p_harris <= .5),
+                .group = "keep") |> 
+      mutate(region = tolower(state.name[match(state, state.abb)])),
+    by = "region")
+
+# Static map
+electoral_map <- ggplot(map_data, aes(x = long, y = lat, group = group, fill = prob_dem,
+                                      text = paste("State:", tools::toTitleCase(region), "<br>",
+                                                   "Democratic Win Probability:", round(prob_dem * 100, 2), "%", "<br>",
+                                                   "Republican Win Probability:", round(prob_rep * 100, 2), "%"))) +
+  geom_polygon(color = "black", size = 0.2) + 
+  scale_fill_gradient(low = "#E40A04", high = "#3A4EB1", 
+                      name = "Democratic Win Probability") +
+  labs(title = "Win probabilities by state") +
+  theme_minimal() +
+  coord_fixed(1.3) +
+  theme(
+    panel.grid = element_blank(),
+    axis.text = element_blank(),
+    axis.ticks = element_blank(),
+    axis.title = element_blank()
+  ) +
+  guides(fill = "none")
+
+# Interactive map
+ggplotly(electoral_map, tooltip = "text")
+```
+
+
+## Statsprognoser
+
+```{r, echo=FALSE}
+#| warning: false
+#| message: false
+
+state_voting <- draws |> 
+  group_by(state) |> 
+  summarise(
+    mean_dem = mean(p_harris),
+    low_dem = quantile(p_harris, 0.05),
+    high_dem = quantile(p_harris, 0.95),
+    .groups = "keep") |> 
+  mutate(
+    label = factor(
+      state),
+    winner = ifelse(
+      mean_dem >= .5,
+      'Democratic',
+      'Republican')) |> 
+  ggplot(aes(
+    x = label,
+    y = mean_dem,
+    ymax = high_dem,
+    ymin = low_dem,
+    color = winner,
+    text = paste("State:", state, "<br>",
+                 "Predicted winner:", winner, "<br>",
+                 "Predicted democratic vote share:", round(mean_dem, 2), "<br>",
+                 "Lower-bound:", round(low_dem, 2), "<br>",
+                 "Upper-bound:", round(high_dem, 2)))) +
+  geom_point(size = 2) +
+  geom_linerange(size = 2.5,
+                 alpha = .4) +
+  geom_hline(yintercept = .5,
+             linetype = "dashed") +
+  scale_y_continuous("Predicted Harris two-party vote-share") +
+  scale_x_discrete(
+    "",
+    limits = forecast$state[
+      forecast$t == max(forecast$t) & forecast$state != "--"][order(
+        forecast$mean_dem[forecast$t == max(forecast$t) & forecast$state != "--"],
+        decreasing = TRUE)]) +
+  scale_color_manual(
+    name = 'State winner',
+    values = c('Democratic' = '#3A4EB1',
+               'Republican' = '#E40A04')) +
+  geom_text(
+    aes(label = round(mean_dem, digits = 2)),
+    nudge_y = .07,
+    size = 3) +
+  coord_flip() +
+  theme_fivethirtyeight() +
+  labs(title = "Predicted democratic two-party voteshare")
+
+# Interactive plot
+ggplotly(state_voting, tooltip = "text")
+```
+
+## Scenarier
+
+```{r, echo=FALSE}
+#| warning: false
+#| message: false
+
+# Making data frame indicating the winner in each state in each draw
+winner_df <- data.frame(draw = unique(draws$draw))
+
+for (s in unique(draws$state)) {
+  
+  temp <- draws |> 
+    filter(t == max(draws$t) & state == s & p_harris > .5)
+  
+  winner_df <- winner_df |> 
+    mutate(!!sym(paste0(s)) := if_else(
+      draw %in% temp$draw,
+      "Dem",
+      "Rep"))
+}
+
+final_evs <- draws |> 
+  filter(t == max(t)) %>%
+  group_by(draw) %>%
+  summarise(dem_ev = sum(ev * (p_harris > 0.5)),
+            rep_ev = sum(ev * (p_harris < 0.5)),
+            .groups = "keep") |> 
+  mutate(harris_win = if_else(
+    dem_ev >= 270,
+    1,
+    0))
+
+
+## Adding winner and harris evs to winner df
+winner_df <- winner_df |> 
+  left_join(final_evs |> select(-rep_ev))
+
+# Making table showing how the swing states can pan out
+winner_df |> 
+  group_by(AZ, WI, MI, PA, NC, GA, NV) |> 
+  summarise(
+    `Scenario probability (%)` = n() / nrow(winner_df),
+    `Median Harris EVs` = median(dem_ev),
+    `Probability Harris win (%)` = mean(harris_win),
+    .groups = "keep") |> 
+  arrange(desc(`Scenario probability (%)`)) |> 
+  mutate(
+    `Scenario probability (%)` = round(`Scenario probability (%)`*100, 2),
+    `Scenario probability (%)` = case_when(
+      `Scenario probability (%)` == 1 ~ "99.99",
+      `Scenario probability (%)` == 0 ~ "0.01",
+      .default = as.character(`Scenario probability (%)`)),
+    `Probability Harris win (%)` = round(`Probability Harris win (%)`*100, 2),
+    `Probability Harris win (%)` = case_when(
+      `Probability Harris win (%)` == 100 ~ "99.99",
+      `Probability Harris win (%)` == 0 ~ "0.01",
+      .default = as.character(`Probability Harris win (%)`)),
+    `Median Harris EVs` = as.character(`Median Harris EVs`)) |> 
+  DT::datatable(
+    filter = "none",
+    rownames = FALSE,
+    fillContainer = FALSE) |> 
+  formatStyle(
+    columns = c("AZ", "WI", "MI", "PA", "NC", "GA", "NV"),
+    backgroundColor = styleEqual(
+      c("Rep", "Dem"),
+      values = c('#E40A04', '#3A4EB1')))
+```
+
+
+## Svingstatsprognoser
+
+```{r, echo=FALSE}
+#| warning: false
+#| message: false
+
+tipping_point_df <- draws |> 
+  filter(t == max(draws$t)) |> 
+  group_by(draw) |> 
+  arrange(p_harris) |> 
+  mutate(cumulative_ev = cumsum(ev),
+         tipping_point = if_else(
+           lag(cumulative_ev <= 269) & cumulative_ev >= 270,
+           1,
+           0)) |> 
+  ungroup() |> 
+  group_by(state) |> 
+  summarise(tip_prob = mean(tipping_point),
+            .groups = "keep")
+
+draws |> 
+  filter(
+    t == max(draws$t) & state %in% c(
+      "PA", "AZ", "WI", "MI", "GA", "NC", "NV")) |> 
+  mutate(winner = if_else(
+    p_harris > .5,
+    "Harris",
+    "Trump")) |> 
+  ggplot(aes(y = state, x = p_harris)) +
+  stat_halfeye(
+    aes(fill = after_stat(x > 0.5)),
+    density = "histogram",
+    .width = c(0.8, 0.95),
+    justification = 0) +
+  geom_text(
+    data = tipping_point_df |> 
+      filter(state %in% c("PA", "AZ", "WI", "MI", "GA", "NC", "NV")),
+    aes(label = round(tip_prob*100, 1), x = .32),
+    hjust = 0,
+    vjust = .75,
+    nudge_x = 0.05,
+    size = 3.5, 
+    color = "black"
+  ) +
+  geom_vline(xintercept = .5, linetype = "dashed") +
+  annotate(
+    "text",
+    x = .35, 
+    y = "WI", # Position it above all states
+    label = "Tipping point \nprobability (%)",
+    hjust = 0,
+    vjust = -.3,
+    size = 3.5,
+    fontface = "bold") +
+  scale_fill_manual(values = c("TRUE" = "#3A4EB1", "FALSE" = "#E40A04")) +
+  theme_fivethirtyeight() +
+  guides(fill = "none") +
+  labs(
+    x = "Democratic two-party vote-share",
+    caption = "Tipping point probability er procentdelen af simulationer, hvor en stat giver en kandidat den afgørende\n270ende valgmand.\n\nHistogrammerne viser udfaldet i hver svingstat i hver simulation.\nPunkterne angiver medianestimatet, mens linjerne angiver 80 og 95 pct. usikkerhedsintervaller.",
+    title = "Svingstatsprognoser og tipping points") +
+  theme(
+    plot.caption.position = "plot", plot.caption = element_text(hjust = 0),
+    axis.title.x = element_text())
+
+```
+
+
+:::
