@@ -8,8 +8,15 @@ editor_options:
 
 ```{r, include=FALSE}
 # Setup
-harris_states <- c()
-trump_states <- c()
+call_votes <- FALSE
+
+harris_states <- c("VT")
+trump_states <- c("IN", "KY")
+
+called_states <- c()
+called_harris_votes <- c()
+
+
 
 library(plotly)
 library(tidyverse)
@@ -30,25 +37,45 @@ state_weights <- data.frame(
   weight = as.numeric(state_weights)
 )
 
+
+# Calling based on votes
+if (call_votes) {
+  
 # Subsetting based on called states
-if (!is.null(harris_states)) {
-  for (s in harris_states) {
+if (!is.null(called_states)) {
+  for (s in 1:length(called_states)) {
     draws_to_select <- draws |> 
-      filter(state == s & p_harris > .5)
+      filter(state == called_states[s] &
+               p_harris <= called_harris_votes[s] + 0.01 &
+               p_harris >= called_harris_votes[s] - 0.01)
     
     draws <- draws |> 
       filter(draw %in% draws_to_select$draw)
+  }}
+} else { # Else just call state
+  
+  if (!is.null(harris_states)) {
+    for (s in 1:length(harris_states)) {
+      draws_to_select <- draws |> 
+        filter(state == harris_states[s] &
+                 p_harris > .5)
+      
+      draws <- draws |> 
+        filter(draw %in% draws_to_select$draw)
+    }}
+    
+    
+  if (!is.null(trump_states)) {
+    for (s in 1:length(trump_states)) {
+      draws_to_select <- draws |> 
+        filter(state == trump_states[s] &
+                 p_harris < .5)
+      
+      draws <- draws |> 
+        filter(draw %in% draws_to_select$draw)
+    }
+    }
   }
-}
-if (!is.null(trump_states)) {
-  for (s in harris_states) {
-    draws_to_select <- draws |> 
-      filter(state == s & p_harris < .5)
-
-    draws <- draws |> 
-      filter(draw %in% draws_to_select$draw)
-  }
-}
 
 ```
 
